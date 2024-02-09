@@ -2,6 +2,7 @@ import { Request, Response } from "express"
 import { randomUUID } from "node:crypto"
 import { prisma } from "../../../services/prisma.service"
 import z from "zod"
+import { redis } from "../../../services/redis.service"
 
 export async function findAll(_: Request, res: Response) {
   const polls = await prisma.poll.findMany({
@@ -25,7 +26,7 @@ export async function findOneById(req: Request, res: Response) {
 
   const { pollId } = findPollParams.parse(req.params)    
 
-  const polls = await prisma.poll.findUnique({
+  const poll = await prisma.poll.findUnique({
     where: {
       id: pollId
     },
@@ -39,7 +40,35 @@ export async function findOneById(req: Request, res: Response) {
     }
   })  
 
-  return res.status(200).send(polls)
+  if (!poll) {
+    return res.status(404).send({ message: 'Poll not found!' })
+  }
+
+  const result = await redis.zrange(pollId, 0, -1, 'WITHSCORES') // Return ranking by key of all options (started: 0 ended: -1 (all)) on redis
+
+  const votes = result.reduce((obj, line, index) => {
+    if (index % 2 === 0) {
+      const score = result[index + 1]
+      
+      Object.assign(obj, { [line]: Number(score) })      
+    }
+
+    return obj
+  }, {} as Record<string, number>)
+
+  return res.status(200).send({
+    poll: {
+      id: poll.id,
+      title: poll.title,
+      options: poll.options.map(option => {
+        return {
+          id: option.id,
+          title: option.title,
+          score: (option.id in votes) ? votes[option.id] : 0
+        }
+      })
+    }
+  })
 }
 
 export async function createPoll(req: Request, res: Response) {
@@ -118,8 +147,8 @@ export async function voteOnPoll(req: Request, res: Response) {
   const { pollOptionId } = voteOnPollBody.parse(req.body)
   const { pollId } = voteOnPollParams.parse(req.params)    
 
-  let { sessionId } = req.cookies
-
+  let { sessionId } = req.cookies  
+  
   if (sessionId) {
     const userPreviousVoteOnPoll = await prisma.vote.findUnique({
       where: {
@@ -136,6 +165,8 @@ export async function voteOnPoll(req: Request, res: Response) {
           id: userPreviousVoteOnPoll.id
         }
       })
+
+      await redis.zincrby(pollId, -1, userPreviousVoteOnPoll.pollOptionId) // Decrement the old option score of user on redis
     } else if (userPreviousVoteOnPoll) {
       return res.status(400).send({ message: 'You already voted on this poll.' })
     }
@@ -159,6 +190,8 @@ export async function voteOnPoll(req: Request, res: Response) {
       pollOptionId
     }
   })
+
+  await redis.zincrby(pollId, 1, pollOptionId) // Increment option score on redis
 
   return res.status(201).send()
 }

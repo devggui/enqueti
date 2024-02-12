@@ -1,8 +1,10 @@
+import z from "zod"
 import { Request, Response } from "express"
 import { randomUUID } from "node:crypto"
 import { prisma } from "../../../services/prisma.service"
-import z from "zod"
 import { redis } from "../../../services/redis.service"
+import { io } from "../../server"
+import { voting } from "../../../utils/voting-pub-sub"
 
 export async function findAll(_: Request, res: Response) {
   const polls = await prisma.poll.findMany({
@@ -14,7 +16,7 @@ export async function findAll(_: Request, res: Response) {
         }
       }
     }
-  })  
+  })    
 
   return res.status(200).send(polls)
 }
@@ -147,8 +149,8 @@ export async function voteOnPoll(req: Request, res: Response) {
   const { pollOptionId } = voteOnPollBody.parse(req.body)
   const { pollId } = voteOnPollParams.parse(req.params)    
 
-  let { sessionId } = req.cookies  
-  
+  let { sessionId } = req.cookies    
+
   if (sessionId) {
     const userPreviousVoteOnPoll = await prisma.vote.findUnique({
       where: {
@@ -166,8 +168,14 @@ export async function voteOnPoll(req: Request, res: Response) {
         }
       })
 
-      await redis.zincrby(pollId, -1, userPreviousVoteOnPoll.pollOptionId) // Decrement the old option score of user on redis
-    } else if (userPreviousVoteOnPoll) {
+      const votes = await redis.zincrby(pollId, -1, userPreviousVoteOnPoll.pollOptionId) // Decrement the old option score of user on redis
+
+      voting.publish(pollId, {
+        pollOptionId: userPreviousVoteOnPoll.pollOptionId,
+        votes: Number(votes)
+      })          
+
+    } else if (userPreviousVoteOnPoll) {      
       return res.status(400).send({ message: 'You already voted on this poll.' })
     }
   }
@@ -191,7 +199,16 @@ export async function voteOnPoll(req: Request, res: Response) {
     }
   })
 
-  await redis.zincrby(pollId, 1, pollOptionId) // Increment option score on redis
+  const votes = await redis.zincrby(pollId, 1, pollOptionId) // Increment option score on redis  
+
+  voting.publish(pollId, {
+    pollOptionId,
+    votes: Number(votes)
+  })
+
+  voting.subscribe(pollId, (message) => {
+    io.emit('votes:create', JSON.stringify(message))
+  })
 
   return res.status(201).send()
 }

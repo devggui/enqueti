@@ -1,16 +1,20 @@
 import express from "express"
 import cors from "cors"
-import router from "./routes"
 import { createServer } from "node:http"
-import { WebSocketServer } from "ws"
+import { Server } from "socket.io"
+
+import router from "./routes"
+import { voting } from "../utils/voting-pub-sub"
 
 const cookieParser = require('cookie-parser')
 
 const app = express()
 const server = createServer(app)
-export const wss = new WebSocketServer({ server })
+export const io = new Server(server)
 
-app.use(cookieParser())
+io.on('connection', () => {
+  voting.subscribe('', () => {})
+})
 
 app.use(cors({
   allowedHeaders: ['content-type', 'Authorization'],
@@ -20,6 +24,7 @@ app.use(cors({
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
+app.use(cookieParser())
 
 app.use(router)
 
